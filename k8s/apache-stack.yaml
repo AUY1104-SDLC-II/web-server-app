@@ -1,25 +1,17 @@
-# Namespace aislado para limitar el radio de explosión (Blast Radius).
+# k8s/apache-stack.yaml
 apiVersion: v1
 kind: Namespace
 metadata:
   name: web-workload
 
 ---
-# Declaración de la carga de trabajo garantizando idempotencia, Zero-Downtime y Hardening.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: apache-server
   namespace: web-workload
-  labels:
-    app: apache
 spec:
   replicas: 2
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
   selector:
     matchLabels:
       app: apache
@@ -28,63 +20,13 @@ spec:
       labels:
         app: apache
     spec:
-      # PodSecurityContext: Asegura que los volúmenes montados pertenezcan al UID correcto.
-      securityContext:
-        fsGroup: 1001
-        runAsUser: 1001
-        runAsGroup: 1001
-        runAsNonRoot: true
       containers:
         - name: apache
-          # Bitnami Apache está diseñada para correr sin privilegios en el puerto 8080.
-          image: bitnami/apache:2.4
+          image: httpd:latest
           ports:
-            - containerPort: 8080
-          # ContainerSecurityContext: Remediación directa de KSV-0014 y KSV-0118.
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-          # Sondas ajustadas al nuevo puerto unprivileged.
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "250m"
-              memory: "256Mi"
-          # Volúmenes efímeros para satisfacer 'readOnlyRootFilesystem: true'.
-          volumeMounts:
-            - name: apache-tmp
-              mountPath: /tmp
-            - name: apache-logs
-              mountPath: /opt/bitnami/apache/logs
-            - name: apache-var
-              mountPath: /opt/bitnami/apache/var
-      volumes:
-        - name: apache-tmp
-          emptyDir: {}
-        - name: apache-logs
-          emptyDir: {}
-        - name: apache-var
-          emptyDir: {}
+            - containerPort: 80
 
 ---
-# Exposición del servicio anclado al puerto solicitado (corregido) 30100.
 apiVersion: v1
 kind: Service
 metadata:
@@ -96,6 +38,6 @@ spec:
     app: apache
   ports:
     - protocol: TCP
-      port: 8080        # El puerto interno del cluster
-      targetPort: 8080  # El puerto donde escucha el contenedor rootless
-      nodePort: 30100   # El puerto expuesto en la VM (corregido a rango válido)
+      port: 80
+      targetPort: 80
+      nodePort: 30100
