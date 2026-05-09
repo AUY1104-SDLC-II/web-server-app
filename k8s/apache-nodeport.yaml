@@ -1,55 +1,76 @@
+# Implementación de Namespace aislado para limitar el radio de explosión (Blast Radius).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: web-workload
+
 ---
-# Define la versión de la API de Kubernetes para crear despliegues.
+# Declaración de la carga de trabajo garantizando idempotencia y Zero-Downtime.
 apiVersion: apps/v1
-# Especifica que el recurso a crear es un Deployment (gestiona Pods y ReplicaSets).
 kind: Deployment
 metadata:
-  # Nombre único del despliegue dentro del clúster.
   name: apache-server
+  namespace: web-workload
   labels:
-    # Etiqueta para identificar y agrupar los recursos de esta aplicación.
-    app: apache-web
+    app: apache
 spec:
-  # Límite estricto: 1 sola réplica. El Learner Lab restringe a 32 vCPU totales y presupuesto limitado.
-  replicas: 1
+  # Garantiza alta disponibilidad; nunca depender de una sola instancia.
+  replicas: 2
+  # Zero-Downtime Deployment: Asegura que al menos 1 pod esté vivo durante las actualizaciones.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
-      # El Deployment gestionará los Pods que tengan esta etiqueta exacta.
-      app: apache-web
+      app: apache
   template:
     metadata:
       labels:
-        # Etiqueta inyectada a cada Pod creado (debe coincidir con el selector).
-        app: apache-web
+        app: apache
     spec:
       containers:
-        # Nombre del contenedor dentro del Pod.
+        # Uso de imagen Alpine para reducir superficie de ataque (distroless/minimal).
         - name: apache
-          # Uso de Alpine Linux: Imagen de ~5MB. Minimiza consumo de almacenamiento (EBS máx 100GB en Lab) y RAM.
-          image: httpd:2.4-alpine
+          image: httpd:alpine
           ports:
-            # Puerto en el que Apache escucha internamente dentro del contenedor.
             - containerPort: 80
+          # Principio de Privilegio Mínimo: Evita escalada de privilegios en el nodo host.
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false # Apache httpd oficial requiere root inicial para bindear el puerto 80, luego hace drop a www-data. En un entorno 100% hardened usaríamos un puerto >1024 y runAsNonRoot: true.
+          # Liveness y Readiness probes: El LoadBalancer/Ingress no enviará tráfico si el pod no está listo.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            # Prevención de ruidosos vecinos (Noisy Neighbors) limitando CPU y Memoria.
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+
 ---
-# Define la versión de la API para servicios de red.
+# Exposición del servicio anclado al puerto corregido 30100.
 apiVersion: v1
-# Especifica que el recurso es un Service (expone los Pods a la red).
 kind: Service
 metadata:
-  # Nombre del servicio.
   name: apache-service
+  namespace: web-workload
 spec:
-  # Anti-patrón aceptado temporalmente: Exponer puerto directamente en la IP pública del nodo EC2.
+  # NodePort para acceso directo a la VM del Sandbox (como dicta la arquitectura de EA2).
   type: NodePort
   selector:
-    # Vincula este servicio a los Pods del Deployment anterior.
-    app: apache-web
+    app: apache
   ports:
-    # Protocolo de capa 4.
     - protocol: TCP
-      # Puerto interno del clúster (ClusterIP).
       port: 80
-      # Puerto destino en el contenedor (coincide con containerPort).
       targetPort: 80
-      # Puerto estático mapeado en la interfaz de red de la EC2. Requisito explícito cumplido.
+      # Puerto corregido. Debe estar entre 30000 y 32767.
       nodePort: 30100

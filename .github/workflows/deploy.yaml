@@ -1,22 +1,93 @@
-name: Desplegar Apache en K3s (Learner Lab)
+name: "Secured Apache Deployment"
 
 on:
   push:
     branches:
       - main
+    paths:
+      - 'k8s/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
+# Principio de Privilegio Mínimo: Solo los permisos estrictamente necesarios para el runner.
+permissions:
+  contents: read
+  id-token: write # Requerido si migramos a AWS OIDC en el futuro para eliminar AWS_ACCESS_KEY.
+
 jobs:
-  deploy-apache:
-    # Reutiliza tu workflow existente que ejecuta el `kubectl apply` vía SSH
-    uses: asanchezo-duoc/AUY1104-SharedWorkflows/.github/workflows/eks-deploy-api.yaml@EA2
+  # Job 1: Shift-Left Security. Escanea manifiestos antes de aprovisionar infraestructura.
+  security-scan:
+    name: "IaC & Container Security Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Trivy Vulnerability Scanner (IaC)"
+        uses: aquasecurity/trivy-action@master
+        with:
+          # Escaneo estático (SAST) de los manifiestos K8s buscando misconfigurations.
+          scan-type: 'config'
+          hide-progress: false
+          format: 'table'
+          exit-code: '1' # Rompe el pipeline si encuentra vulnerabilidades críticas.
+          severity: 'CRITICAL,HIGH'
+
+  # Job 2: Aprovisionamiento de Infraestructura delegada (reutilizando tu librería).
+  provision-infra:
+    name: "Provision Sandbox"
+    needs: security-scan
+    # Invocación de flujo reutilizable. Garantiza estandarización en toda la organización.
+    uses: asanchezo-duoc/AUY1104-SharedWorkflows/.github/workflows/ea2-provision-k8s-sandbox.yaml@EA2
     with:
-      # No hay build de Docker, pasamos valores dummy para omitir la fase de Docker Hub si tu workflow lo exige,
-      # o asegúrate de que tu workflow compartido permita saltar el build si solo hay manifiestos.
-      image-name: "httpd"
-      image-tag: "2.4-alpine"
-      k3s-server-public-ip: ${{ vars.K3S_SERVER_PUBLIC_IP }}
+      aws_region: us-east-1
+      instance_type: t3.small
+      k8s_stack: k3s
+      # Abrimos explícitamente el CIDR para consumir la web por NodePort.
+      k8s_api_cidr_ipv4: 0.0.0.0/0
     secrets:
-      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       EA2_SSH_PRIVATE_KEY: ${{ secrets.EA2_SSH_PRIVATE_KEY }}
+
+  # Job 3: Despliegue de la Carga de Trabajo con validación de estado y Rollback automático.
+  deploy-workload:
+    name: "Deploy Apache & Verify"
+    needs: provision-infra
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      # Configuración segura del agente SSH para inyectar los manifiestos al EC2 remoto.
+      - name: "Setup SSH Agent"
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EA2_SSH_PRIVATE_KEY }}
+
+      - name: "Apply K8s Manifests"
+        env:
+          # La IP pública debería ser expuesta por el job de terraform (outputs), asumimos inyección por variable.
+          SERVER_IP: ${{ vars.K3S_SERVER_PUBLIC_IP }}
+        run: |
+          # Copia segura de artefactos.
+          scp -o StrictHostKeyChecking=accept-new -r k8s "ubuntu@${SERVER_IP}:/tmp/k8s-apache"
+          
+          # Aplicación idempotente de los recursos en el cluster remoto.
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
+            'sudo k3s kubectl apply -f /tmp/k8s-apache/apache-stack.yaml'
+          
+          # Espera activa (Wait) para confirmar que el despliegue es exitoso antes de dar por verde el Job.
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
+            'sudo k3s kubectl rollout status deployment/apache-server -n web-workload --timeout=90s'
+
+      # Mecanismo DR/Rollback: Solo se ejecuta si el paso anterior (despliegue o validación de estado) falla.
+      - name: "Rollback on Failure"
+        if: failure()
+        env:
+          SERVER_IP: ${{ vars.K3S_SERVER_PUBLIC_IP }}
+        run: |
+          echo "Despliegue fallido. Iniciando rollback automático para proteger el estado de producción."
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
+            'sudo k3s kubectl rollout undo deployment/apache-server -n web-workload'
+          exit 1 # Forzamos la salida en error para no enmascarar la falla en los logs de GitHub.
