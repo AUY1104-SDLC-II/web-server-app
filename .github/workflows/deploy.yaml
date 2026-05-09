@@ -47,7 +47,6 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
       EA2_SSH_PRIVATE_KEY: ${{ secrets.EA2_SSH_PRIVATE_KEY }}
-      # PREVENCIÓN DE RATE LIMITS: Inyección de credenciales Docker para asegurar pulls en K3s
       DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
       DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
 
@@ -60,44 +59,72 @@ jobs:
       - name: "Checkout repository"
         uses: actions/checkout@v4
 
+      # Autenticamos AWS en este Job para poder consultar la API
+      - name: "Configure AWS Credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      # Arquitectura Dinámica: Descubrimiento de la IP de la VM recién aprovisionada
+      - name: "Discover Dynamic EC2 IP"
+        run: |
+          IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=ea2-k8s-sandbox" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          
+          if [ "$IP" == "None" ] || [ -z "$IP" ]; then
+            echo "❌ Error: No se pudo descubrir la IP pública de la instancia recién creada."
+            exit 1
+          fi
+          
+          echo "SERVER_IP=$IP" >> $GITHUB_ENV
+          echo "✅ Descubrimiento exitoso. IP dinámica mapeada: $IP"
+
       - name: "Setup SSH Agent"
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.EA2_SSH_PRIVATE_KEY }}
 
       - name: "Apply K8s Manifests"
-        env:
-          # Se inyecta la IP registrada hace 1 hora en tus variables de repositorio
-          SERVER_IP: ${{ vars.K3S_SERVER_PUBLIC_IP }}
         run: |
-          # 0. Validación Pre-Flight (Fail-Fast) para evitar fallos de red inexplicables
+          # 0. Validación Pre-Flight (Fail-Fast)
           if [ ! -f "k8s/apache-stack.yaml" ]; then
             echo "❌ ERROR CRÍTICO: El artefacto k8s/apache-stack.yaml no existe en el repositorio."
-            echo "Debes crear la carpeta 'k8s' y guardar el manifiesto ahí antes de ejecutar el pipeline."
             exit 1
           fi
 
-          # 1. Preparación de ruta explícita y copia 1:1 para evitar duplicación de carpetas
+          # 1. Copia segura de manifiestos
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" 'mkdir -p /tmp/k8s-apache'
           scp -o StrictHostKeyChecking=accept-new k8s/apache-stack.yaml "ubuntu@${SERVER_IP}:/tmp/k8s-apache/apache-stack.yaml"
           
-          # 2. Aplicación declarativa
+          # 2. Hardening Ops: Asegurar el Namespace e inyectar credenciales Docker localmente
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
+            "sudo k3s kubectl create namespace web-workload --dry-run=client -o yaml | sudo k3s kubectl apply -f -"
+          
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
+            "sudo k3s kubectl delete secret dockerhub-cred -n web-workload --ignore-not-found && \
+             sudo k3s kubectl create secret docker-registry dockerhub-cred \
+               --docker-server=https://index.docker.io/v1/ \
+               --docker-username='${{ secrets.DOCKER_USERNAME }}' \
+               --docker-password='${{ secrets.DOCKER_PASSWORD }}' \
+               --docker-email=noreply@local -n web-workload"
+          
+          # 3. Aplicación declarativa
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
             'sudo k3s kubectl apply -f /tmp/k8s-apache/apache-stack.yaml'
           
-          # 3. Validación de Zero-Downtime
+          # 4. Validación de Zero-Downtime
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
             'sudo k3s kubectl rollout status deployment/apache-server -n web-workload --timeout=90s'
 
       - name: "Rollback on Failure"
         if: failure()
-        env:
-          SERVER_IP: ${{ vars.K3S_SERVER_PUBLIC_IP }}
         run: |
           echo "Despliegue fallido. Iniciando rollback automático para proteger el estado de producción."
-          # Tolerancia a fallos: Si el namespace no existe (Ej: fallo en el primer despliegue), se notifica sin romper la tubería de error
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
             'sudo k3s kubectl rollout undo deployment/apache-server -n web-workload || echo "⚠️ Rollback abortado: El Deployment no existía previamente (Día Cero)."'
-          
-          # Se mantiene el código de salida fallido para que GitHub Actions marque el job en rojo
           exit 1
