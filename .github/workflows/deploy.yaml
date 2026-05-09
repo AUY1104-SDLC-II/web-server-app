@@ -1,0 +1,22 @@
+name: Desplegar Apache en K3s (Learner Lab)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy-apache:
+    # Reutiliza tu workflow existente que ejecuta el `kubectl apply` vía SSH
+    uses: asanchezo-duoc/AUY1104-SharedWorkflows/.github/workflows/eks-deploy-api.yaml@EA2
+    with:
+      # No hay build de Docker, pasamos valores dummy para omitir la fase de Docker Hub si tu workflow lo exige,
+      # o asegúrate de que tu workflow compartido permita saltar el build si solo hay manifiestos.
+      image-name: "httpd"
+      image-tag: "2.4-alpine"
+      k3s-server-public-ip: ${{ vars.K3S_SERVER_PUBLIC_IP }}
+    secrets:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      EA2_SSH_PRIVATE_KEY: ${{ secrets.EA2_SSH_PRIVATE_KEY }}

@@ -1,0 +1,55 @@
+---
+# Define la versión de la API de Kubernetes para crear despliegues.
+apiVersion: apps/v1
+# Especifica que el recurso a crear es un Deployment (gestiona Pods y ReplicaSets).
+kind: Deployment
+metadata:
+  # Nombre único del despliegue dentro del clúster.
+  name: apache-server
+  labels:
+    # Etiqueta para identificar y agrupar los recursos de esta aplicación.
+    app: apache-web
+spec:
+  # Límite estricto: 1 sola réplica. El Learner Lab restringe a 32 vCPU totales y presupuesto limitado.
+  replicas: 1
+  selector:
+    matchLabels:
+      # El Deployment gestionará los Pods que tengan esta etiqueta exacta.
+      app: apache-web
+  template:
+    metadata:
+      labels:
+        # Etiqueta inyectada a cada Pod creado (debe coincidir con el selector).
+        app: apache-web
+    spec:
+      containers:
+        # Nombre del contenedor dentro del Pod.
+        - name: apache
+          # Uso de Alpine Linux: Imagen de ~5MB. Minimiza consumo de almacenamiento (EBS máx 100GB en Lab) y RAM.
+          image: httpd:2.4-alpine
+          ports:
+            # Puerto en el que Apache escucha internamente dentro del contenedor.
+            - containerPort: 80
+---
+# Define la versión de la API para servicios de red.
+apiVersion: v1
+# Especifica que el recurso es un Service (expone los Pods a la red).
+kind: Service
+metadata:
+  # Nombre del servicio.
+  name: apache-service
+spec:
+  # Anti-patrón aceptado temporalmente: Exponer puerto directamente en la IP pública del nodo EC2.
+  type: NodePort
+  selector:
+    # Vincula este servicio a los Pods del Deployment anterior.
+    app: apache-web
+  ports:
+    # Protocolo de capa 4.
+    - protocol: TCP
+      # Puerto interno del clúster (ClusterIP).
+      port: 80
+      # Puerto destino en el contenedor (coincide con containerPort).
+      targetPort: 80
+      # Puerto estático mapeado en la interfaz de red de la EC2. Requisito explícito cumplido.
+      nodePort: 30100
