@@ -70,6 +70,13 @@ jobs:
           # Se inyecta la IP registrada hace 1 hora en tus variables de repositorio
           SERVER_IP: ${{ vars.K3S_SERVER_PUBLIC_IP }}
         run: |
+          # 0. Validación Pre-Flight (Fail-Fast) para evitar fallos de red inexplicables
+          if [ ! -f "k8s/apache-stack.yaml" ]; then
+            echo "❌ ERROR CRÍTICO: El artefacto k8s/apache-stack.yaml no existe en el repositorio."
+            echo "Debes crear la carpeta 'k8s' y guardar el manifiesto ahí antes de ejecutar el pipeline."
+            exit 1
+          fi
+
           # 1. Preparación de ruta explícita y copia 1:1 para evitar duplicación de carpetas
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" 'mkdir -p /tmp/k8s-apache'
           scp -o StrictHostKeyChecking=accept-new k8s/apache-stack.yaml "ubuntu@${SERVER_IP}:/tmp/k8s-apache/apache-stack.yaml"
