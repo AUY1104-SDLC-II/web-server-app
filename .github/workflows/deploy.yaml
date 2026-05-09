@@ -111,20 +111,25 @@ jobs:
                --docker-server=https://index.docker.io/v1/ \
                --docker-username='${{ secrets.DOCKER_USERNAME }}' \
                --docker-password='${{ secrets.DOCKER_PASSWORD }}' \
-               --docker-email=noreply@local -n web-workload"
+               --docker-email=noreply@local -n web-workload && \
+             sudo k3s kubectl patch serviceaccount default -n web-workload -p '{\"imagePullSecrets\":[{\"name\":\"dockerhub-cred\"}]}'"
           
           # 3. Aplicación declarativa
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
             'sudo k3s kubectl apply -f /tmp/k8s-apache/apache-stack.yaml'
           
-          # 4. Validación de Zero-Downtime
+          # 4. Validación de Zero-Downtime con tolerancia de Red
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
-            'sudo k3s kubectl rollout status deployment/apache-server -n web-workload --timeout=90s'
+            'sudo k3s kubectl rollout status deployment/apache-server -n web-workload --timeout=180s'
 
       - name: "Rollback on Failure"
         if: failure()
         run: |
-          echo "Despliegue fallido. Iniciando rollback automático para proteger el estado de producción."
+          echo "⚠️ Despliegue fallido. Capturando estado de los Pods para diagnóstico (Shift-Left Troubleshooting):"
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
+            'sudo k3s kubectl describe pods -n web-workload && sudo k3s kubectl logs -l app=apache -n web-workload --tail=50 || true'
+
+          echo "🔄 Iniciando rollback automático para proteger el estado de producción."
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${SERVER_IP}" \
             'sudo k3s kubectl rollout undo deployment/apache-server -n web-workload || echo "⚠️ Rollback abortado: El Deployment no existía previamente (Día Cero)."'
           exit 1
